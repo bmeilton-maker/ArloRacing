@@ -5,6 +5,10 @@ class OncomingCarNode: SKSpriteNode {
     /// Speed at which this car moves leftward (toward the player), in pts/sec.
     var oncomingSpeed: CGFloat = 250
 
+    // A race spawns many oncoming cars but there are only
+    // (vehicleType × colorIndex) distinct appearances — render each once.
+    private static var textureCache: [String: SKTexture] = [:]
+
     static func create(lane: Int, trackNode: TrackNode, vehicleType: OncomingVehicleType = .sedan) -> OncomingCarNode {
         let colors: [UIColor] = [
             UIColor(red: 0.85, green: 0.2, blue: 0.2, alpha: 1),   // red
@@ -13,28 +17,30 @@ class OncomingCarNode: SKSpriteNode {
             UIColor(red: 0.6, green: 0.25, blue: 0.75, alpha: 1),  // purple
             UIColor(red: 0.9, green: 0.8, blue: 0.15, alpha: 1),   // yellow
         ]
-        let color = colors[abs(lane) % colors.count]
+        let colorIndex = abs(lane) % colors.count
+        let color = colors[colorIndex]
 
         let size: CGSize
-        let texture: SKTexture
-
         switch vehicleType {
-        case .sedan:
-            size = CGSize(width: 55, height: 26)
+        case .sedan:      size = CGSize(width: 55, height: 26)
+        case .semi:       size = CGSize(width: 95, height: 28)
+        case .motorcycle: size = CGSize(width: 40, height: 16)
+        case .dumpTruck:  size = CGSize(width: 75, height: 30)
+        }
+
+        let cacheKey = "\(vehicleType)-\(colorIndex)"
+        let texture: SKTexture
+        if let cached = textureCache[cacheKey] {
+            texture = cached
+        } else {
             let renderSize = CGSize(width: size.width * 2, height: size.height * 2)
-            texture = generateSedanTexture(size: renderSize, color: color)
-        case .semi:
-            size = CGSize(width: 95, height: 28)
-            let renderSize = CGSize(width: size.width * 2, height: size.height * 2)
-            texture = generateSemiTexture(size: renderSize, color: color)
-        case .motorcycle:
-            size = CGSize(width: 40, height: 16)
-            let renderSize = CGSize(width: size.width * 2, height: size.height * 2)
-            texture = generateMotorcycleTexture(size: renderSize, color: color)
-        case .dumpTruck:
-            size = CGSize(width: 75, height: 30)
-            let renderSize = CGSize(width: size.width * 2, height: size.height * 2)
-            texture = generateDumpTruckTexture(size: renderSize, color: color)
+            switch vehicleType {
+            case .sedan:      texture = generateSedanTexture(size: renderSize, color: color)
+            case .semi:       texture = generateSemiTexture(size: renderSize, color: color)
+            case .motorcycle: texture = generateMotorcycleTexture(size: renderSize, color: color)
+            case .dumpTruck:  texture = generateDumpTruckTexture(size: renderSize, color: color)
+            }
+            textureCache[cacheKey] = texture
         }
 
         let node = OncomingCarNode(texture: texture, size: size)

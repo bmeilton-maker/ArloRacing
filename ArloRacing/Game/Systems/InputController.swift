@@ -37,6 +37,13 @@ class InputController {
         currentInput = Input()
     }
 
+    /// Steering is a per-touch-move delta. The scene must call this after
+    /// consuming it each frame — otherwise a stationary finger leaves the
+    /// last delta in place and the car drifts forever.
+    func consumeSteer() {
+        currentInput.steer = 0
+    }
+
     func reset() {
         touchActive = false
         currentTouchPosition = nil

@@ -18,18 +18,29 @@ struct FinishScreenView: View {
     @State private var showStat3 = false
     @State private var showStat4 = false
 
+    // Crash shake + new-high-score confetti burst
+    @State private var shakeAmount: CGFloat = 0
+    @State private var runConfetti = false
+
     var body: some View {
         ZStack {
             Color.black.opacity(0.7).ignoresSafeArea()
 
-            VStack(spacing: 20) {
+            if runConfetti {
+                ConfettiBurst()
+            }
+
+            VStack(spacing: 18) {
+                headerIcon
+
                 if gameState.isCrashed {
                     Text("CRASHED!")
-                        .font(.system(size: 40, weight: .black, design: .rounded))
+                        .font(AppTheme.displayFont(40))
                         .foregroundStyle(LinearGradient(colors: [.red, .orange], startPoint: .leading, endPoint: .trailing))
+                        .modifier(ShakeEffect(animatableData: shakeAmount))
                 } else {
                     Text(isNewHighScore ? "NEW HIGH SCORE!" : "RACE COMPLETE!")
-                        .font(.system(size: 36, weight: .black, design: .rounded))
+                        .font(AppTheme.displayFont(36))
                         .foregroundStyle(
                             isNewHighScore
                             ? AnyShapeStyle(LinearGradient(colors: [.yellow, .orange], startPoint: .leading, endPoint: .trailing))
@@ -49,8 +60,8 @@ struct FinishScreenView: View {
 
                 if let track = gameState.selectedTrack {
                     Text(track.name)
-                        .font(.system(size: 18, weight: .medium, design: .rounded))
-                        .foregroundColor(.gray)
+                        .font(AppTheme.bodyFont(18))
+                        .foregroundColor(AppTheme.textSecondary)
                 }
 
                 // Stats breakdown with staggered animation
@@ -79,14 +90,16 @@ struct FinishScreenView: View {
                     Button {
                         onRetry()
                     } label: {
-                        MenuButton(title: "RETRY", color: .orange)
+                        MenuButton(title: "RETRY", color: .orange, icon: "arrow.clockwise")
                     }
+                    .buttonStyle(PressableButtonStyle())
 
                     Button {
                         onMenu()
                     } label: {
-                        MenuButton(title: "MENU", color: .gray)
+                        MenuButton(title: "MENU", color: .gray, icon: "house.fill")
                     }
+                    .buttonStyle(PressableButtonStyle())
                 }
             }
 
@@ -99,7 +112,21 @@ struct FinishScreenView: View {
         .onAppear {
             checkHighScore()
             animateStats()
+            if gameState.isCrashed {
+                withAnimation(.easeOut(duration: 0.55)) { shakeAmount = 1 }
+            }
         }
+    }
+
+    private var headerIcon: some View {
+        Image(systemName: gameState.isCrashed ? "exclamationmark.triangle.fill" : (isNewHighScore ? "trophy.fill" : "flag.checkered"))
+            .font(.system(size: 32, weight: .bold))
+            .foregroundStyle(
+                gameState.isCrashed
+                ? AnyShapeStyle(Color.red)
+                : AnyShapeStyle(AppTheme.titleGradient)
+            )
+            .shadow(color: (gameState.isCrashed ? Color.red : AppTheme.primary).opacity(0.5), radius: 8, y: 3)
     }
 
     private func animateStats() {
@@ -116,8 +143,11 @@ struct FinishScreenView: View {
         let timeMillis = Int(time * 1000)
         isNewHighScore = LeaderboardManager.isTopScore(trackId: trackId, timeMillis: timeMillis, context: modelContext)
 
-        if isNewHighScore && !hasSaved {
-            showNameEntry = true
+        if isNewHighScore {
+            runConfetti = true
+            if !hasSaved {
+                showNameEntry = true
+            }
         }
     }
 
@@ -130,6 +160,76 @@ struct FinishScreenView: View {
         let entry = LeaderboardEntry(trackId: trackId, playerName: name, timeMillis: timeMillis, vehicleId: vehicleId)
         LeaderboardManager.addEntry(entry, context: modelContext)
         hasSaved = true
+    }
+}
+
+// MARK: - Crash impact shake
+//
+// Classic SwiftUI shake: a GeometryEffect driven by an animatable CGFloat
+// running 0→1, with the amplitude tapering off (decay) as it settles.
+
+private struct ShakeEffect: GeometryEffect {
+    var animatableData: CGFloat
+
+    func effectValue(size: CGSize) -> ProjectionTransform {
+        let decay = 1 - animatableData
+        let translation = 7 * sin(animatableData * .pi * 8) * decay
+        return ProjectionTransform(CGAffineTransform(translationX: translation, y: 0))
+    }
+}
+
+// MARK: - Confetti burst (new high score)
+//
+// Pure SwiftUI, one-shot: a handful of tiny rectangles fall from the top and
+// fade out. No timers — each piece's own `.animation` runs once on appear.
+
+private struct ConfettiPiece: Identifiable {
+    let id = UUID()
+    let xFraction: CGFloat
+    let color: Color
+    let width: CGFloat
+    let height: CGFloat
+    let rotation: Double
+    let delay: Double
+    let duration: Double
+}
+
+private struct ConfettiBurst: View {
+    @State private var animate = false
+
+    // @State (not `let`) so the random burst is generated once and survives
+    // re-renders of the parent view instead of reshuffling mid-animation.
+    @State private var pieces: [ConfettiPiece] = (0..<26).map { _ in
+        ConfettiPiece(
+            xFraction: CGFloat.random(in: 0.02...0.98),
+            color: [Color.orange, .yellow, .red, .white, .green, .blue].randomElement()!,
+            width: CGFloat.random(in: 5...9),
+            height: CGFloat.random(in: 3...5),
+            rotation: Double.random(in: 0...360),
+            delay: Double.random(in: 0...0.3),
+            duration: Double.random(in: 0.8...1.4)
+        )
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack {
+                ForEach(pieces) { piece in
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(piece.color)
+                        .frame(width: piece.width, height: piece.height)
+                        .rotationEffect(.degrees(animate ? piece.rotation + 220 : piece.rotation))
+                        .position(
+                            x: geo.size.width * piece.xFraction,
+                            y: animate ? geo.size.height + 20 : -16
+                        )
+                        .opacity(animate ? 0 : 1)
+                        .animation(.easeIn(duration: piece.duration).delay(piece.delay), value: animate)
+                }
+            }
+        }
+        .allowsHitTesting(false)
+        .onAppear { animate = true }
     }
 }
 

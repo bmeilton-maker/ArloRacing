@@ -15,13 +15,4 @@ class ObstacleEffects {
         physics.gripFactor = physics.baseGripFactor * 0.3
         AudioManager.shared.play(.skid)
     }
-
-    static func applyHeavyCollision(to physics: inout VehiclePhysics, carNode: SKSpriteNode) {
-        physics.currentSpeed = 10
-        physics.isRecovering = true
-        physics.recoveryTimer = GameConstants.recoveryDuration
-
-        let spin = SKAction.rotate(byAngle: .pi * 2, duration: 0.5)
-        carNode.run(spin)
-    }
 }

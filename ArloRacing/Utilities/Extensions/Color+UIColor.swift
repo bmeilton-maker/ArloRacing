@@ -1,11 +1,5 @@
 import SwiftUI
 
-extension Color {
-    var uiColor: UIColor {
-        UIColor(self)
-    }
-}
-
 extension CGFloat {
     static func lerp(_ a: CGFloat, _ b: CGFloat, t: CGFloat) -> CGFloat {
         return a + (b - a) * t

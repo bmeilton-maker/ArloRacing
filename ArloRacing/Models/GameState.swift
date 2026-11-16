@@ -10,8 +10,6 @@ class GameState {
     var isCrashed: Bool = false
     var isPaused: Bool = false
     var isCountingDown: Bool = false
-    var shouldRetry: Bool = false
-    var shouldQuitToMenu: Bool = false
 
     // Race stats for finish screen
     var dodgeCount: Int = 0
@@ -25,8 +23,6 @@ class GameState {
         isCrashed = false
         isPaused = false
         isCountingDown = false
-        shouldRetry = false
-        shouldQuitToMenu = false
         dodgeCount = 0
         maxCombo = 0
         obstaclesHit = 0

@@ -6,7 +6,7 @@ class AudioManager {
     private var players: [SoundEffect: AVAudioPlayer] = [:]
     private var enginePlayer: AVAudioPlayer?
 
-    enum SoundEffect: String {
+    enum SoundEffect: String, CaseIterable {
         case coneHit = "cone_hit"
         case skid = "skid"
         case countdownBeep = "countdown_beep"
@@ -16,6 +16,7 @@ class AudioManager {
 
     private init() {
         configureAudioSession()
+        preloadEffects()
     }
 
     private func configureAudioSession() {
@@ -23,23 +24,34 @@ class AudioManager {
         try? AVAudioSession.sharedInstance().setActive(true)
     }
 
-    func play(_ effect: SoundEffect) {
-        guard let url = Bundle.main.url(forResource: effect.rawValue, withExtension: "wav") else { return }
-        do {
-            let player = try AVAudioPlayer(contentsOf: url)
+    private func preloadEffects() {
+        for effect in SoundEffect.allCases {
+            guard let url = Bundle.main.url(forResource: effect.rawValue, withExtension: "wav"),
+                  let player = try? AVAudioPlayer(contentsOf: url) else { continue }
+            player.prepareToPlay()
             players[effect] = player
-            player.play()
-        } catch {
-            // Sound file not available - silent fallback
         }
     }
 
+    func play(_ effect: SoundEffect) {
+        guard let player = players[effect] else { return }
+        player.currentTime = 0
+        player.play()
+    }
+
     func startEngine() {
+        guard enginePlayer == nil else {
+            enginePlayer?.play()
+            return
+        }
         guard let url = Bundle.main.url(forResource: "engine_loop", withExtension: "wav") else { return }
         do {
-            enginePlayer = try AVAudioPlayer(contentsOf: url)
-            enginePlayer?.numberOfLoops = -1
-            enginePlayer?.play()
+            let player = try AVAudioPlayer(contentsOf: url)
+            player.numberOfLoops = -1
+            player.enableRate = true // required for rate/pitch changes to take effect
+            player.prepareToPlay()
+            player.play()
+            enginePlayer = player
         } catch {
             // Sound file not available
         }
@@ -57,6 +69,5 @@ class AudioManager {
     func stopAll() {
         stopEngine()
         players.values.forEach { $0.stop() }
-        players.removeAll()
     }
 }

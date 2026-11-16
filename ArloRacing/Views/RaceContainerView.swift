@@ -7,78 +7,87 @@ struct RaceContainerView: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var scene: RaceScene?
-    @State private var showFinish = false
     @State private var showPause = false
 
     var body: some View {
-        ZStack {
-            if let scene = scene {
-                SpriteView(scene: scene)
-                    .ignoresSafeArea()
-            } else {
-                Color.black.ignoresSafeArea()
-            }
+        GeometryReader { geo in
+            ZStack {
+                if let scene = scene {
+                    SpriteView(scene: scene)
+                        .ignoresSafeArea()
+                } else {
+                    Color.black.ignoresSafeArea()
+                }
 
-            // Pause button
-            if !gameState.isRaceComplete && !gameState.isCountingDown {
-                VStack {
-                    HStack {
-                        Spacer()
-                        Button {
-                            scene?.pauseGame()
-                            showPause = true
-                        } label: {
-                            Image(systemName: "pause.fill")
-                                .font(.title2)
-                                .foregroundColor(.white)
-                                .padding(12)
-                                .background(Circle().fill(.ultraThinMaterial))
+                // Pause button
+                if !gameState.isRaceComplete && !gameState.isCountingDown && !showPause {
+                    VStack {
+                        HStack {
+                            Spacer()
+                            Button {
+                                scene?.pauseGame()
+                                showPause = true
+                            } label: {
+                                Image(systemName: "pause.fill")
+                                    .font(.title2)
+                                    .foregroundColor(.white)
+                                    .padding(12)
+                                    .background(Circle().fill(.ultraThinMaterial))
+                            }
+                            .padding(.trailing, 20)
+                            .padding(.top, 10)
                         }
-                        .padding(.trailing, 20)
-                        .padding(.top, 10)
+                        Spacer()
                     }
-                    Spacer()
+                }
+
+                // Pause overlay
+                if showPause {
+                    PauseOverlay(
+                        onResume: {
+                            showPause = false
+                            scene?.resumeGame()
+                        },
+                        onQuit: {
+                            showPause = false
+                            scene?.cleanup()
+                            dismiss()
+                        }
+                    )
+                }
+
+                // Finish screen
+                if gameState.isRaceComplete {
+                    FinishScreenView(
+                        onRetry: {
+                            scene?.cleanup()
+                            gameState.reset()
+                            createScene(size: geo.size)
+                        },
+                        onMenu: {
+                            scene?.cleanup()
+                            dismiss()
+                        }
+                    )
                 }
             }
-
-            // Pause overlay
-            if showPause {
-                PauseOverlay(
-                    onResume: {
-                        showPause = false
-                        scene?.resumeGame()
-                    },
-                    onQuit: {
-                        showPause = false
-                        scene?.cleanup()
-                        dismiss()
-                    }
-                )
-            }
-
-            // Finish screen
-            if gameState.isRaceComplete {
-                FinishScreenView(
-                    onRetry: {
-                        gameState.isRaceComplete = false
-                        scene?.cleanup()
-                        createScene()
-                    },
-                    onMenu: {
-                        scene?.cleanup()
-                        dismiss()
-                    }
-                )
+            .onAppear {
+                createScene(size: geo.size)
             }
         }
-        .onAppear {
-            createScene()
-        }
+        .ignoresSafeArea()
         .onDisappear {
             scene?.cleanup()
         }
+        .onChange(of: gameState.isRaceComplete) { _, isComplete in
+            // The race can finish while the pause overlay is up (finish/crash
+            // animations aren't frozen by pause) — never leave both showing.
+            if isComplete {
+                showPause = false
+            }
+        }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.willResignActiveNotification)) { _ in
-            if !gameState.isRaceComplete {
+            if !gameState.isRaceComplete && !showPause {
                 scene?.pauseGame()
                 showPause = true
             }
@@ -86,8 +95,8 @@ struct RaceContainerView: View {
         .navigationBarBackButtonHidden(true)
     }
 
-    private func createScene() {
-        let newScene = RaceScene(size: UIScreen.main.bounds.size)
+    private func createScene(size: CGSize) {
+        let newScene = RaceScene(size: size)
         newScene.scaleMode = .resizeFill
         newScene.gameState = gameState
         scene = newScene

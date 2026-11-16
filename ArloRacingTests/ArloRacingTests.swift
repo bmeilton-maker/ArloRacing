@@ -1,7 +1,81 @@
 import XCTest
+import SwiftData
 @testable import ArloRacing
 
 final class ArloRacingTests: XCTestCase {
+
+    // MARK: - LeaderboardManager Tests
+
+    /// Returns the container (not just the context): the context must not
+    /// outlive its container, so each test holds the container for its
+    /// full duration.
+    @MainActor
+    private func makeInMemoryContainer() throws -> ModelContainer {
+        let config = ModelConfiguration(isStoredInMemoryOnly: true)
+        return try ModelContainer(for: LeaderboardEntry.self, configurations: config)
+    }
+
+    @MainActor
+    func testIsTopScoreWhenBoardNotFull() throws {
+        let container = try makeInMemoryContainer()
+        let context = container.mainContext
+        for i in 0..<5 {
+            LeaderboardManager.addEntry(
+                LeaderboardEntry(trackId: 1, playerName: "P\(i)", timeMillis: 10_000 + i * 1000, vehicleId: "sports"),
+                context: context
+            )
+        }
+        // Board has 5 of 10 slots — even a slow time qualifies
+        XCTAssertTrue(LeaderboardManager.isTopScore(trackId: 1, timeMillis: 99_999, context: context))
+    }
+
+    @MainActor
+    func testIsTopScoreOnFullBoard() throws {
+        let container = try makeInMemoryContainer()
+        let context = container.mainContext
+        for i in 0..<LeaderboardManager.maxEntries {
+            LeaderboardManager.addEntry(
+                LeaderboardEntry(trackId: 1, playerName: "P\(i)", timeMillis: 10_000 + i * 1000, vehicleId: "sports"),
+                context: context
+            )
+        }
+        // Worst time on the board is 19_000
+        XCTAssertTrue(LeaderboardManager.isTopScore(trackId: 1, timeMillis: 18_999, context: context))
+        XCTAssertFalse(LeaderboardManager.isTopScore(trackId: 1, timeMillis: 19_000, context: context))
+        XCTAssertFalse(LeaderboardManager.isTopScore(trackId: 1, timeMillis: 25_000, context: context))
+    }
+
+    @MainActor
+    func testIsTopScoreIsPerTrack() throws {
+        let container = try makeInMemoryContainer()
+        let context = container.mainContext
+        for i in 0..<LeaderboardManager.maxEntries {
+            LeaderboardManager.addEntry(
+                LeaderboardEntry(trackId: 1, playerName: "P\(i)", timeMillis: 10_000 + i * 1000, vehicleId: "sports"),
+                context: context
+            )
+        }
+        // Track 2's board is empty — any time qualifies there
+        XCTAssertTrue(LeaderboardManager.isTopScore(trackId: 2, timeMillis: 99_999, context: context))
+    }
+
+    @MainActor
+    func testAddEntryTrimsBoardToMax() throws {
+        let container = try makeInMemoryContainer()
+        let context = container.mainContext
+        for i in 0..<(LeaderboardManager.maxEntries + 3) {
+            LeaderboardManager.addEntry(
+                LeaderboardEntry(trackId: 1, playerName: "P\(i)", timeMillis: 10_000 + i * 1000, vehicleId: "sports"),
+                context: context
+            )
+        }
+        let descriptor = FetchDescriptor<LeaderboardEntry>(sortBy: [SortDescriptor(\LeaderboardEntry.timeMillis)])
+        let entries = try context.fetch(descriptor)
+        XCTAssertEqual(entries.count, LeaderboardManager.maxEntries)
+        // The fastest times survive the trim
+        XCTAssertEqual(entries.first?.timeMillis, 10_000)
+        XCTAssertEqual(entries.last?.timeMillis, 10_000 + (LeaderboardManager.maxEntries - 1) * 1000)
+    }
 
     // MARK: - Vehicle Tests
 
@@ -174,36 +248,44 @@ final class ArloRacingTests: XCTestCase {
         XCTAssertTrue(timing.isRunning)
     }
 
-    func testTimingPauseResume() {
+    func testTimingAccumulatesTicks() {
         let timing = TimingSystem()
         timing.start()
-
-        Thread.sleep(forTimeInterval: 0.05)
-        timing.pause()
-        let pausedTime = timing.elapsedTime
-
-        Thread.sleep(forTimeInterval: 0.05)
-        let stillPausedTime = timing.elapsedTime
-        // Time should not advance much while paused
-        XCTAssertEqual(pausedTime, stillPausedTime, accuracy: 0.01)
-
-        timing.resume()
-        XCTAssertTrue(timing.isRunning)
+        for _ in 0..<60 {
+            timing.tick(1.0 / 60.0)
+        }
+        XCTAssertEqual(timing.elapsedTime, 1.0, accuracy: 0.001)
     }
 
-    func testTimingStop() {
+    func testTimingIgnoresTicksBeforeStart() {
+        let timing = TimingSystem()
+        timing.tick(0.5)
+        XCTAssertEqual(timing.elapsedTime, 0)
+    }
+
+    func testTimingIgnoresTicksAfterStop() {
         let timing = TimingSystem()
         timing.start()
-        Thread.sleep(forTimeInterval: 0.05)
+        timing.tick(0.5)
         let finalTime = timing.stop()
-        XCTAssertGreaterThan(finalTime, 0)
+        XCTAssertEqual(finalTime, 0.5, accuracy: 0.001)
+        timing.tick(0.5)
+        XCTAssertEqual(timing.elapsedTime, 0.5, accuracy: 0.001)
         XCTAssertFalse(timing.isRunning)
+    }
+
+    func testTimingStartResetsElapsed() {
+        let timing = TimingSystem()
+        timing.start()
+        timing.tick(2.0)
+        timing.start()
+        XCTAssertEqual(timing.elapsedTime, 0)
     }
 
     func testTimingReset() {
         let timing = TimingSystem()
         timing.start()
-        Thread.sleep(forTimeInterval: 0.05)
+        timing.tick(0.5)
         _ = timing.stop()
         timing.reset()
         XCTAssertEqual(timing.elapsedTime, 0)
@@ -268,6 +350,23 @@ final class ArloRacingTests: XCTestCase {
         XCTAssertFalse(input.isActive)
         XCTAssertEqual(input.currentInput.steer, 0)
         XCTAssertEqual(input.currentInput.throttle, 0)
+    }
+
+    func testConsumeSteerClearsDeltaButKeepsThrottle() {
+        // A stationary finger fires no touchesMoved events, so the scene
+        // must consume the steer delta each frame or the car drifts forever.
+        let input = InputController()
+        input.configure(sceneSize: CGSize(width: 800, height: 400))
+        input.touchBegan(at: CGPoint(x: 600, y: 200))
+        input.touchMoved(to: CGPoint(x: 600, y: 220))
+        XCTAssertEqual(input.currentInput.steer, 20)
+        let throttleBefore = input.currentInput.throttle
+
+        input.consumeSteer()
+
+        XCTAssertEqual(input.currentInput.steer, 0)
+        XCTAssertEqual(input.currentInput.throttle, throttleBefore)
+        XCTAssertTrue(input.isActive)
     }
 
     // MARK: - TrackGenerator Tests
@@ -340,8 +439,6 @@ final class ArloRacingTests: XCTestCase {
         state.isCrashed = true
         state.isPaused = true
         state.isCountingDown = true
-        state.shouldRetry = true
-        state.shouldQuitToMenu = true
         state.dodgeCount = 5
         state.maxCombo = 3
         state.obstaclesHit = 2
@@ -354,11 +451,29 @@ final class ArloRacingTests: XCTestCase {
         XCTAssertFalse(state.isCrashed)
         XCTAssertFalse(state.isPaused)
         XCTAssertFalse(state.isCountingDown)
-        XCTAssertFalse(state.shouldRetry)
-        XCTAssertFalse(state.shouldQuitToMenu)
         XCTAssertEqual(state.dodgeCount, 0)
         XCTAssertEqual(state.maxCombo, 0)
         XCTAssertEqual(state.obstaclesHit, 0)
+        XCTAssertEqual(state.topSpeedReached, 0)
+    }
+
+    func testResetPreservesSelectionForRetry() {
+        // The Retry button calls reset() — it must clear per-race state
+        // (especially isCrashed, which drives the finish screen header)
+        // while keeping the chosen track, vehicle, and color.
+        let state = GameState()
+        state.selectedTrack = allTracks[2]
+        state.selectedVehicle = allVehicles[1]
+        state.isCrashed = true
+        state.dodgeCount = 7
+        state.topSpeedReached = 400
+
+        state.reset()
+
+        XCTAssertEqual(state.selectedTrack?.id, allTracks[2].id)
+        XCTAssertEqual(state.selectedVehicle?.id, allVehicles[1].id)
+        XCTAssertFalse(state.isCrashed)
+        XCTAssertEqual(state.dodgeCount, 0)
         XCTAssertEqual(state.topSpeedReached, 0)
     }
 

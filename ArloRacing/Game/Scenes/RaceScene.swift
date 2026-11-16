@@ -28,6 +28,7 @@ class RaceScene: SKScene, SKPhysicsContactDelegate {
 
     private var backgroundLayers: [SKSpriteNode] = []
     private var speedLineEmitter: SKNode?
+    private var speedLineIntensity: CGFloat = 0
 
     private var cameraNode2: SKCameraNode! // named to avoid conflict with SKScene.camera
 
@@ -51,7 +52,10 @@ class RaceScene: SKScene, SKPhysicsContactDelegate {
 
     override func didMove(to view: SKView) {
         guard let track = gameState.selectedTrack,
-              let vehicle = gameState.selectedVehicle else { return }
+              let vehicle = gameState.selectedVehicle else {
+            assertionFailure("RaceScene presented without a selected track/vehicle")
+            return
+        }
 
         trackLength = track.length
         vehiclePhysics = VehiclePhysics(vehicle: vehicle, trackModifier: track.maxSpeedModifier)
@@ -74,30 +78,337 @@ class RaceScene: SKScene, SKPhysicsContactDelegate {
     // MARK: - Setup
 
     private func setupBackground(theme: TrackTheme) {
-        let bg = theme.backgroundColor
-        self.backgroundColor = UIColor(red: bg.r, green: bg.g, blue: bg.b, alpha: 1.0)
+        let top = theme.skyTopColor
+        self.backgroundColor = UIColor(red: top.r, green: top.g, blue: top.b, alpha: 1.0)
 
-        // Parallax layers - simple colored strips at different Y positions
-        let layerColors: [(r: CGFloat, g: CGFloat, b: CGFloat, a: CGFloat)] = [
-            (bg.r * 0.8, bg.g * 0.8, bg.b * 0.8, 0.5),
-            (bg.r * 0.6, bg.g * 0.7, bg.b * 0.6, 0.4),
-            (bg.r * 0.9, bg.g * 0.85, bg.b * 0.7, 0.3),
+        // Sky: full-scene gradient, compressed so the horizon color sits
+        // just above the road band (the visible sky is the top ~15%).
+        let sky = SKSpriteNode(texture: Self.skyTexture(size: size, theme: theme), size: size)
+        sky.position = CGPoint(x: size.width / 2, y: size.height / 2)
+        sky.zPosition = ZPositions.background - 4
+        addChild(sky)
+
+        // Sun (or moon for night) with a soft glow, upper right.
+        addCelestialBody(theme: theme)
+
+        // Ground strip between the road's top curb and the horizon.
+        let groundC = theme.groundColor
+        let upperGround = SKSpriteNode(
+            color: UIColor(red: groundC.r, green: groundC.g, blue: groundC.b, alpha: 1.0),
+            size: CGSize(width: size.width, height: size.height * 0.09)
+        )
+        upperGround.anchorPoint = CGPoint(x: 0, y: 0)
+        upperGround.position = CGPoint(x: 0, y: size.height * 0.84)
+        upperGround.zPosition = ZPositions.background - 1
+        addChild(upperGround)
+
+        // Foreground ground below the road (slightly darker for depth).
+        let lowerGround = SKSpriteNode(
+            color: UIColor(red: groundC.r * 0.82, green: groundC.g * 0.82, blue: groundC.b * 0.82, alpha: 1.0),
+            size: CGSize(width: size.width, height: size.height * 0.16)
+        )
+        lowerGround.anchorPoint = CGPoint(x: 0, y: 0)
+        lowerGround.position = CGPoint(x: 0, y: 0)
+        lowerGround.zPosition = ZPositions.background - 1
+        addChild(lowerGround)
+
+        // Three parallax layers, two tiles each. INVARIANT (update() relies
+        // on it): anchorPoint.x == 0, tile width == 2 × scene width, pair
+        // offset by tile width; wrap adds width * 2.
+        let tileWidth = size.width * 2
+        let bandHeight = size.height * 0.16
+
+        let farTexture = Self.sceneryTexture(theme: theme, width: tileWidth, height: bandHeight, near: false)
+        let nearTexture = Self.sceneryTexture(theme: theme, width: tileWidth, height: bandHeight * 0.72, near: true)
+        let detailTexture = Self.foregroundDetailTexture(theme: theme, width: tileWidth, height: size.height * 0.12)
+
+        let layerSpecs: [(texture: SKTexture, height: CGFloat, y: CGFloat, z: CGFloat)] = [
+            (farTexture, bandHeight, size.height * 0.855, ZPositions.background),          // speed 0.1
+            (nearTexture, bandHeight * 0.72, size.height * 0.845, ZPositions.background + 1), // speed 0.3
+            (detailTexture, size.height * 0.12, size.height * 0.005, ZPositions.background + 2), // speed 0.6
         ]
 
-        for i in 0..<3 {
-            let lc = layerColors[i]
-            let color = UIColor(red: lc.r, green: lc.g, blue: lc.b, alpha: lc.a)
-
+        for spec in layerSpecs {
             for j in 0..<2 {
-                let stripe = SKSpriteNode(color: color, size: CGSize(width: size.width * 2, height: size.height * 0.1))
-                stripe.anchorPoint = CGPoint(x: 0, y: 0.5)
-                let yBase: CGFloat = i == 0 ? size.height * 0.92 : (i == 1 ? size.height * 0.88 : size.height * 0.08)
-                stripe.position = CGPoint(x: CGFloat(j) * size.width * 2, y: yBase)
-                stripe.zPosition = ZPositions.background + CGFloat(i)
-                addChild(stripe)
-                backgroundLayers.append(stripe)
+                let layer = SKSpriteNode(texture: spec.texture, size: CGSize(width: tileWidth, height: spec.height))
+                layer.anchorPoint = CGPoint(x: 0, y: 0)
+                layer.position = CGPoint(x: CGFloat(j) * tileWidth, y: spec.y)
+                layer.zPosition = spec.z
+                addChild(layer)
+                backgroundLayers.append(layer)
             }
         }
+
+        // Ambient atmosphere: twinkling stars at night, falling snow in the arctic.
+        if theme == .night { addStars() }
+        if theme == .arctic { addSnowfall() }
+    }
+
+    private func addCelestialBody(theme: TrackTheme) {
+        let cc = theme.celestialColor
+        let color = UIColor(red: cc.r, green: cc.g, blue: cc.b, alpha: 1.0)
+        let radius: CGFloat = theme == .night ? 14 : 18
+        let center = CGPoint(x: size.width * 0.82, y: size.height * 0.93)
+
+        let glow = SKShapeNode(circleOfRadius: radius * 2.2)
+        glow.fillColor = color.withAlphaComponent(0.18)
+        glow.strokeColor = .clear
+        glow.position = center
+        glow.zPosition = ZPositions.background - 3
+        addChild(glow)
+
+        let body = SKShapeNode(circleOfRadius: radius)
+        body.fillColor = color
+        body.strokeColor = .clear
+        body.position = center
+        body.zPosition = ZPositions.background - 3
+        addChild(body)
+
+        if theme == .night {
+            // Crescent shadow bite for the moon
+            let bite = SKShapeNode(circleOfRadius: radius * 0.85)
+            let sky = theme.skyTopColor
+            bite.fillColor = UIColor(red: sky.r, green: sky.g, blue: sky.b, alpha: 1.0)
+            bite.strokeColor = .clear
+            bite.position = CGPoint(x: center.x - radius * 0.45, y: center.y + radius * 0.3)
+            bite.zPosition = ZPositions.background - 3
+            addChild(bite)
+        }
+    }
+
+    private func addStars() {
+        for _ in 0..<18 {
+            let star = SKShapeNode(circleOfRadius: CGFloat.random(in: 0.8...1.8))
+            star.fillColor = .white
+            star.strokeColor = .clear
+            star.position = CGPoint(
+                x: CGFloat.random(in: 0...size.width),
+                y: CGFloat.random(in: size.height * 0.87...size.height * 0.99)
+            )
+            star.alpha = CGFloat.random(in: 0.3...0.9)
+            star.zPosition = ZPositions.background - 3
+            addChild(star)
+
+            let twinkle = SKAction.sequence([
+                SKAction.fadeAlpha(to: 0.15, duration: Double.random(in: 0.8...1.8)),
+                SKAction.fadeAlpha(to: 0.9, duration: Double.random(in: 0.8...1.8)),
+            ])
+            star.run(SKAction.repeatForever(twinkle))
+        }
+    }
+
+    private func addSnowfall() {
+        for _ in 0..<16 {
+            let flake = SKShapeNode(circleOfRadius: CGFloat.random(in: 1.2...2.6))
+            flake.fillColor = UIColor(white: 1.0, alpha: 0.7)
+            flake.strokeColor = .clear
+            let startX = CGFloat.random(in: 0...size.width)
+            flake.position = CGPoint(x: startX, y: CGFloat.random(in: 0...size.height))
+            flake.zPosition = ZPositions.effects - 1
+            addChild(flake)
+
+            let duration = Double.random(in: 4.5...8.0)
+            let fall = SKAction.sequence([
+                SKAction.moveBy(x: CGFloat.random(in: -70 ... -30), y: -size.height - 20, duration: duration),
+                SKAction.run { [weak flake] in
+                    flake?.position = CGPoint(x: CGFloat.random(in: 0...(flake?.scene?.size.width ?? 800)), y: (flake?.scene?.size.height ?? 400) + 10)
+                },
+            ])
+            flake.run(SKAction.repeatForever(fall))
+        }
+    }
+
+    // MARK: - Background texture generation (rendered once per race)
+
+    private static func skyTexture(size: CGSize, theme: TrackTheme) -> SKTexture {
+        let top = theme.skyTopColor
+        let horizon = theme.skyHorizonColor
+        let format = UIGraphicsImageRendererFormat()
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: size, format: format)
+        let image = renderer.image { ctx in
+            let colors = [
+                UIColor(red: top.r, green: top.g, blue: top.b, alpha: 1).cgColor,
+                UIColor(red: horizon.r, green: horizon.g, blue: horizon.b, alpha: 1).cgColor,
+            ] as CFArray
+            // Horizon color reached ~18% down the image (just above the road)
+            let gradient = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0.0, 0.18])!
+            ctx.cgContext.drawLinearGradient(
+                gradient,
+                start: .zero,
+                end: CGPoint(x: 0, y: size.height),
+                options: [.drawsAfterEndLocation]
+            )
+        }
+        return SKTexture(image: image)
+    }
+
+    /// Silhouette scenery band. `near == false` draws the far layer
+    /// (dunes / treeline / skyline / peaks); `near == true` draws closer,
+    /// darker motifs (cacti / bushes / lamps / drifts). Motifs keep clear of
+    /// the tile edges so the two-tile wrap never shows a seam.
+    private static func sceneryTexture(theme: TrackTheme, width: CGFloat, height: CGFloat, near: Bool) -> SKTexture {
+        let c = near ? theme.sceneryNearColor : theme.sceneryFarColor
+        let color = UIColor(red: c.r, green: c.g, blue: c.b, alpha: 1.0)
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: width, height: height))
+        let image = renderer.image { _ in
+            color.setFill()
+            // UIKit y=0 is the TOP of the image; the band's bottom is y=height.
+            let baseline = height
+
+            switch (theme, near) {
+            case (.desert, false):
+                // Rolling dunes: broad overlapping half-ellipses
+                var x: CGFloat = 60
+                while x < width - 160 {
+                    let w = CGFloat.random(in: 180...320)
+                    let h = CGFloat.random(in: height * 0.35...height * 0.7)
+                    UIBezierPath(ovalIn: CGRect(x: x, y: baseline - h, width: w, height: h * 2)).fill()
+                    x += w * CGFloat.random(in: 0.55...0.8)
+                }
+            case (.desert, true):
+                // Cacti and rocks
+                var x: CGFloat = 80
+                while x < width - 120 {
+                    if Bool.random() {
+                        let h = CGFloat.random(in: height * 0.5...height * 0.85)
+                        UIBezierPath(roundedRect: CGRect(x: x, y: baseline - h, width: 7, height: h), cornerRadius: 3).fill()
+                        UIBezierPath(roundedRect: CGRect(x: x - 7, y: baseline - h * 0.65, width: 7, height: h * 0.3), cornerRadius: 3).fill()
+                        UIBezierPath(roundedRect: CGRect(x: x + 7, y: baseline - h * 0.75, width: 7, height: h * 0.35), cornerRadius: 3).fill()
+                    } else {
+                        let w = CGFloat.random(in: 16...30)
+                        UIBezierPath(ovalIn: CGRect(x: x, y: baseline - w * 0.5, width: w, height: w)).fill()
+                    }
+                    x += CGFloat.random(in: 130...260)
+                }
+            case (.forest, false), (.arctic, false):
+                // Jagged peaks / treeline
+                let peakCount = Int(width / 90)
+                let path = UIBezierPath()
+                path.move(to: CGPoint(x: 40, y: baseline))
+                for i in 0..<peakCount {
+                    let px = 40 + CGFloat(i) * ((width - 80) / CGFloat(peakCount))
+                    let peakH = CGFloat.random(in: height * 0.4...height * 0.9)
+                    path.addLine(to: CGPoint(x: px + 45, y: baseline - peakH))
+                    path.addLine(to: CGPoint(x: px + 90, y: baseline - CGFloat.random(in: 0...height * 0.2)))
+                }
+                path.addLine(to: CGPoint(x: width - 40, y: baseline))
+                path.close()
+                path.fill()
+                if theme == .arctic {
+                    // Snow caps
+                    UIColor(white: 1.0, alpha: 0.85).setFill()
+                    for i in 0..<peakCount {
+                        let px = 40 + CGFloat(i) * ((width - 80) / CGFloat(peakCount)) + 45
+                        UIBezierPath(ovalIn: CGRect(x: px - 12, y: baseline - height * 0.88, width: 24, height: 9)).fill()
+                    }
+                }
+            case (.forest, true):
+                // Bushes and simple pines
+                var x: CGFloat = 70
+                while x < width - 120 {
+                    if Bool.random() {
+                        let h = CGFloat.random(in: height * 0.5...height * 0.9)
+                        let tree = UIBezierPath()
+                        tree.move(to: CGPoint(x: x, y: baseline))
+                        tree.addLine(to: CGPoint(x: x + 14, y: baseline - h))
+                        tree.addLine(to: CGPoint(x: x + 28, y: baseline))
+                        tree.close()
+                        tree.fill()
+                    } else {
+                        let w = CGFloat.random(in: 24...44)
+                        UIBezierPath(ovalIn: CGRect(x: x, y: baseline - w * 0.4, width: w, height: w * 0.8)).fill()
+                    }
+                    x += CGFloat.random(in: 90...200)
+                }
+            case (.urban, false), (.night, false):
+                // City skyline with lit windows
+                var x: CGFloat = 50
+                while x < width - 150 {
+                    let bw = CGFloat.random(in: 45...90)
+                    let bh = CGFloat.random(in: height * 0.35...height * 0.95)
+                    color.setFill()
+                    UIBezierPath(rect: CGRect(x: x, y: baseline - bh, width: bw, height: bh)).fill()
+                    // Windows — brighter at night
+                    UIColor(red: 1.0, green: 0.9, blue: 0.5, alpha: theme == .night ? 0.85 : 0.35).setFill()
+                    var wy = baseline - bh + 6
+                    while wy < baseline - 8 {
+                        var wx = x + 5
+                        while wx < x + bw - 6 {
+                            if Bool.random() {
+                                UIBezierPath(rect: CGRect(x: wx, y: wy, width: 3.5, height: 4.5)).fill()
+                            }
+                            wx += 9
+                        }
+                        wy += 11
+                    }
+                    x += bw + CGFloat.random(in: 8...40)
+                }
+            case (.urban, true), (.night, true):
+                // Lamp posts and low walls
+                var x: CGFloat = 90
+                while x < width - 120 {
+                    color.setFill()
+                    if Bool.random() {
+                        let h = height * 0.8
+                        UIBezierPath(rect: CGRect(x: x, y: baseline - h, width: 4, height: h)).fill()
+                        UIColor(red: 1.0, green: 0.95, blue: 0.7, alpha: 0.9).setFill()
+                        UIBezierPath(ovalIn: CGRect(x: x - 3, y: baseline - h - 6, width: 10, height: 8)).fill()
+                    } else {
+                        UIBezierPath(roundedRect: CGRect(x: x, y: baseline - height * 0.3, width: CGFloat.random(in: 40...80), height: height * 0.3), cornerRadius: 3).fill()
+                    }
+                    x += CGFloat.random(in: 150...300)
+                }
+            case (.arctic, true):
+                // Snow drifts and small pines
+                var x: CGFloat = 60
+                while x < width - 140 {
+                    if Bool.random() {
+                        let w = CGFloat.random(in: 60...120)
+                        UIBezierPath(ovalIn: CGRect(x: x, y: baseline - height * 0.3, width: w, height: height * 0.6)).fill()
+                    } else {
+                        let h = CGFloat.random(in: height * 0.5...height * 0.8)
+                        let tree = UIBezierPath()
+                        tree.move(to: CGPoint(x: x, y: baseline))
+                        tree.addLine(to: CGPoint(x: x + 12, y: baseline - h))
+                        tree.addLine(to: CGPoint(x: x + 24, y: baseline))
+                        tree.close()
+                        tree.fill()
+                        UIColor(white: 1.0, alpha: 0.5).setFill()
+                        UIBezierPath(ovalIn: CGRect(x: x + 6, y: baseline - h, width: 12, height: 5)).fill()
+                        color.setFill()
+                    }
+                    x += CGFloat.random(in: 110...240)
+                }
+            }
+        }
+        return SKTexture(image: image)
+    }
+
+    /// Fast-scrolling speckle strip for the foreground band below the road.
+    private static func foregroundDetailTexture(theme: TrackTheme, width: CGFloat, height: CGFloat) -> SKTexture {
+        let g = theme.groundColor
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: width, height: height))
+        let image = renderer.image { _ in
+            for _ in 0..<Int(width / 22) {
+                let dark = Bool.random()
+                let factor: CGFloat = dark ? 0.65 : 1.15
+                UIColor(
+                    red: min(1, g.r * factor),
+                    green: min(1, g.g * factor),
+                    blue: min(1, g.b * factor),
+                    alpha: 0.55
+                ).setFill()
+                let w = CGFloat.random(in: 5...16)
+                UIBezierPath(ovalIn: CGRect(
+                    x: CGFloat.random(in: 20...(width - 40)),
+                    y: CGFloat.random(in: 0...(height - 6)),
+                    width: w,
+                    height: w * 0.4
+                )).fill()
+            }
+        }
+        return SKTexture(image: image)
     }
 
     private func setupCamera() {
@@ -184,6 +495,25 @@ class RaceScene: SKScene, SKPhysicsContactDelegate {
             }
         }
 
+        // "FINISH" banner floating above the checkered line (child of
+        // worldNode, so the generic world-scroll loop carries it along).
+        let bannerPanel = SKShapeNode(rectOf: CGSize(width: 96, height: 26), cornerRadius: 6)
+        bannerPanel.fillColor = UIColor(white: 0.08, alpha: 0.85)
+        bannerPanel.strokeColor = UIColor(white: 1.0, alpha: 0.5)
+        bannerPanel.lineWidth = 1.5
+        bannerPanel.position = CGPoint(
+            x: finishLineNode.position.x,
+            y: trackNode.trackYOffset + trackNode.trackHeight + 22
+        )
+        bannerPanel.zPosition = ZPositions.obstacles
+        let bannerLabel = SKLabelNode(fontNamed: "Menlo-Bold")
+        bannerLabel.text = "FINISH"
+        bannerLabel.fontSize = 15
+        bannerLabel.fontColor = .white
+        bannerLabel.verticalAlignmentMode = .center
+        bannerPanel.addChild(bannerLabel)
+        worldNode.addChild(bannerPanel)
+
         // Track bounds
         PhysicsController.setupTrackBounds(self, trackHeight: trackNode.trackHeight, yOffset: trackNode.trackYOffset)
 
@@ -241,7 +571,7 @@ class RaceScene: SKScene, SKPhysicsContactDelegate {
             AudioManager.shared.startEngine()
         })
 
-        run(SKAction.sequence(actions))
+        run(SKAction.sequence(actions), withKey: "countdown")
     }
 
     // MARK: - Update
@@ -267,16 +597,23 @@ class RaceScene: SKScene, SKPhysicsContactDelegate {
         let throttle = inputController.isActive ? inputController.currentInput.throttle : 0
         vehiclePhysics.update(deltaTime: dt, throttle: throttle, fingerDown: inputController.isActive)
 
-        // Update car vertical position (steering)
+        // Advance the race clock with the same dt that moves the world
+        timing.tick(dt)
+
+        // Update car vertical position (steering).
+        // gripFactor is already reduced while slipping (see applyBananaHit).
+        let steerInput = inputController.currentInput.steer
         if inputController.isActive {
-            let steerInput = inputController.currentInput.steer
-            let steerAmount = steerInput * GameConstants.steerSensitivity * (vehiclePhysics.isSlipping ? 0.3 : vehiclePhysics.gripFactor)
+            let steerAmount = steerInput * GameConstants.steerSensitivity * vehiclePhysics.gripFactor
             let targetY = carNode.position.y + steerAmount
             let minY = trackNode.trackYOffset + carNode.size.height / 2
             let maxY = trackNode.trackYOffset + trackNode.trackHeight - carNode.size.height / 2
             let clampedY = clamp(targetY, min: minY, max: maxY)
             carNode.position.y = CGFloat.lerp(carNode.position.y, clampedY, t: GameConstants.steerSmoothing)
         }
+        // Steer is a per-touch-move delta; consume it so a stationary finger
+        // doesn't keep applying the last delta every frame (drift bug).
+        inputController.consumeSteer()
 
         // Scroll world
         let scrollAmount = vehiclePhysics.currentSpeed * CGFloat(dt)
@@ -321,9 +658,9 @@ class RaceScene: SKScene, SKPhysicsContactDelegate {
             }
         }
 
-        // Enhancement 3: Car tilt based on steering
-        if inputController.isActive {
-            let steerInput = inputController.currentInput.steer
+        // Enhancement 3: Car tilt based on steering (uses the steer value
+        // captured above, before it was consumed)
+        if inputController.isActive && steerInput != 0 {
             let targetTilt = clamp(steerInput * -0.08, min: -0.15, max: 0.15)
             currentTilt = currentTilt + (targetTilt - currentTilt) * 0.12
         } else {
@@ -349,8 +686,10 @@ class RaceScene: SKScene, SKPhysicsContactDelegate {
 
         // Enhancement 2: Gradual speed lines (start at 50%, scale to 100%)
         if vehiclePhysics.speedRatio > 0.5 {
-            let intensity = (vehiclePhysics.speedRatio - 0.5) / 0.5 // 0→1 as speedRatio goes 0.5→1.0
-            showSpeedLines(intensity: intensity)
+            // Update the live intensity every frame — the emitter closure
+            // reads this, so the effect actually ramps with speed.
+            speedLineIntensity = (vehiclePhysics.speedRatio - 0.5) / 0.5
+            showSpeedLines()
         } else {
             hideSpeedLines()
         }
@@ -362,7 +701,7 @@ class RaceScene: SKScene, SKPhysicsContactDelegate {
 
         // Update HUD
         hudNode.updateTimer(timing.elapsedTime)
-        hudNode.updateSpeed(vehiclePhysics.currentSpeed, maxSpeed: vehiclePhysics.maxSpeed)
+        hudNode.updateSpeed(vehiclePhysics.currentSpeed)
         hudNode.updateProgress(distanceTraveled / trackLength)
         hudNode.updateCombo(currentCombo)
 
@@ -496,17 +835,19 @@ class RaceScene: SKScene, SKPhysicsContactDelegate {
 
     // MARK: - Speed Lines
 
-    private func showSpeedLines(intensity: CGFloat = 1.0) {
+    private func showSpeedLines() {
         guard speedLineEmitter == nil else { return }
         let container = SKNode()
         container.name = "speedLines"
 
-        let lineCount = max(1, Int(3 * intensity)) // 1-3 lines per burst based on intensity
-        let burstAlpha = 0.1 + 0.25 * intensity // Fade from subtle to visible
-
         let repeat_ = SKAction.repeatForever(SKAction.sequence([
             SKAction.run { [weak self] in
                 guard let self = self else { return }
+                // Read the live intensity each burst so the effect ramps
+                // from subtle at 50% speed to full at top speed.
+                let intensity = self.speedLineIntensity
+                let lineCount = max(1, Int(3 * intensity))
+                let burstAlpha = 0.1 + 0.25 * intensity
                 for _ in 0..<lineCount {
                     let line = SKShapeNode(rectOf: CGSize(width: CGFloat.random(in: 30...60), height: 1.5))
                     line.fillColor = UIColor(white: 1.0, alpha: burstAlpha)
@@ -519,7 +860,7 @@ class RaceScene: SKScene, SKPhysicsContactDelegate {
                     ]))
                 }
             },
-            SKAction.wait(forDuration: max(0.04, 0.12 - 0.08 * Double(intensity))) // Faster at higher intensity
+            SKAction.wait(forDuration: 0.06)
         ]))
         container.run(repeat_, withKey: "speedLineLoop")
 
@@ -633,7 +974,7 @@ class RaceScene: SKScene, SKPhysicsContactDelegate {
 
         if contactMask == (PhysicsCategory.car | PhysicsCategory.obstacle) {
             let obstacleBody = bodyA.categoryBitMask == PhysicsCategory.obstacle ? bodyA : bodyB
-            if let obstacleNode = obstacleBody.node as? ObstacleNode {
+            if let obstacleNode = obstacleBody.node as? ObstacleNode, !raceFinished {
                 handleObstacleCollision(obstacleNode)
             }
         }
@@ -780,10 +1121,17 @@ class RaceScene: SKScene, SKPhysicsContactDelegate {
 
     func pauseGame() {
         gameState.isPaused = true
-        timing.pause()
-        AudioManager.shared.stopEngine()
+        // The race clock is dt-driven; it simply stops advancing because
+        // update() early-returns while gameState.isPaused is true.
         // Do NOT set self.isPaused — SpriteView in SwiftUI doesn't reliably
         // unpause. Instead we gate on gameState.isPaused in update().
+        // SKActions therefore KEEP RUNNING while paused, so the countdown
+        // sequence must be cancelled explicitly; it restarts on resume.
+        if gameState.isCountingDown {
+            removeAction(forKey: "countdown")
+            hudNode.hideCountdown()
+        }
+        AudioManager.shared.stopEngine()
     }
 
     func resumeGame() {
@@ -794,8 +1142,12 @@ class RaceScene: SKScene, SKPhysicsContactDelegate {
         // Ensure SKView/SpriteView hasn't auto-paused the scene or view
         self.isPaused = false
         self.view?.isPaused = false
-        timing.resume()
-        AudioManager.shared.startEngine()
+        if gameState.isCountingDown {
+            // Countdown was cancelled by pauseGame — restart it from 3.
+            startCountdown()
+        } else if raceStarted && !raceFinished {
+            AudioManager.shared.startEngine()
+        }
     }
 
     func cleanup() {

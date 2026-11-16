@@ -3,32 +3,42 @@ import SwiftUI
 
 class CarNode: SKSpriteNode {
 
-    static func create(vehicleId: String, color: Color) -> CarNode {
-        // 10% bigger than original sizes
-        let size: CGSize
+    /// Point size of each vehicle's sprite (10% bigger than original sizes).
+    static func spriteSize(vehicleId: String) -> CGSize {
         switch vehicleId {
         case "motorcycle":
-            size = CGSize(width: 55, height: 24)
+            return CGSize(width: 55, height: 24)
         case "monster":
-            size = CGSize(width: 66, height: 39)
+            return CGSize(width: 66, height: 39)
         case "pickup":
-            size = CGSize(width: 61, height: 33)
+            return CGSize(width: 61, height: 33)
         default: // sports
-            size = CGSize(width: 61, height: 29)
+            return CGSize(width: 61, height: 29)
         }
+    }
 
+    static func create(vehicleId: String, color: Color) -> CarNode {
+        let size = spriteSize(vehicleId: vehicleId)
         // Render at 2x for retina sharpness
         let renderSize = CGSize(width: size.width * 2, height: size.height * 2)
-        let texture = CarNode.generateTexture(vehicleId: vehicleId, size: renderSize, color: UIColor(color))
-        let node = CarNode(texture: texture, size: size)
+        let image = CarNode.generateImage(vehicleId: vehicleId, size: renderSize, color: UIColor(color))
+        let node = CarNode(texture: SKTexture(image: image), size: size)
         node.name = "car"
         node.zPosition = ZPositions.car
         return node
     }
 
-    private static func generateTexture(vehicleId: String, size: CGSize, color: UIColor) -> SKTexture {
+    /// The same vector art the game uses, rendered as a UIImage — lets the
+    /// menus preview the actual car (with the player's chosen color).
+    static func previewImage(vehicleId: String, color: Color, scale: CGFloat = 4) -> UIImage {
+        let size = spriteSize(vehicleId: vehicleId)
+        let renderSize = CGSize(width: size.width * scale, height: size.height * scale)
+        return generateImage(vehicleId: vehicleId, size: renderSize, color: UIColor(color))
+    }
+
+    private static func generateImage(vehicleId: String, size: CGSize, color: UIColor) -> UIImage {
         let renderer = UIGraphicsImageRenderer(size: size)
-        let image = renderer.image { ctx in
+        return renderer.image { ctx in
             let w = size.width
             let h = size.height
             let c = ctx.cgContext
@@ -44,7 +54,6 @@ class CarNode: SKSpriteNode {
                 drawSportsCar(c: c, w: w, h: h, color: color)
             }
         }
-        return SKTexture(image: image)
     }
 
     // MARK: - Sports Car

@@ -3,20 +3,34 @@ import SpriteKit
 class ObstacleNode: SKSpriteNode {
     let obstacleType: ObstacleType
 
+    // Textures are identical per type — render each once, not per node
+    // (a track spawns dozens of these at scene setup).
+    private static var textureCache: [ObstacleType: SKTexture] = [:]
+
+    private static func texture(for type: ObstacleType, renderSize: CGSize) -> SKTexture {
+        if let cached = textureCache[type] { return cached }
+        let texture: SKTexture
+        switch type {
+        case .cone:
+            texture = generateConeTexture(size: renderSize)
+        case .banana:
+            texture = generateBananaTexture(size: renderSize)
+        }
+        textureCache[type] = texture
+        return texture
+    }
+
     init(type: ObstacleType) {
         self.obstacleType = type
         let size: CGSize
-        let texture: SKTexture
-
         switch type {
         case .cone:
             // 10% bigger
             size = CGSize(width: 26, height: 31)
-            texture = ObstacleNode.generateConeTexture(size: CGSize(width: size.width * 2, height: size.height * 2))
         case .banana:
             size = CGSize(width: 29, height: 15)
-            texture = ObstacleNode.generateBananaTexture(size: CGSize(width: size.width * 2, height: size.height * 2))
         }
+        let texture = ObstacleNode.texture(for: type, renderSize: CGSize(width: size.width * 2, height: size.height * 2))
 
         super.init(texture: texture, color: .clear, size: size)
         self.name = "obstacle"
